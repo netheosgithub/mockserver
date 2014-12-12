@@ -8,13 +8,20 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.net.Socket;
+import java.security.Key;
 import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
 import java.security.Principal;
 import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.util.Arrays;
+import java.util.Enumeration;
+import java.util.Map;
+import java.util.Set;
+import org.bouncycastle.asn1.cmp.CertifiedKeyPair;
 
 /**
  * @author jamesdbloom
@@ -60,7 +67,7 @@ public class SSLFactory {
             buildKeyStore();
             // ssl context
             SSLContext sslContext = getSSLContextInstance("TLS");
-            sslContext.init(new KeyManager[]{new SSLKeyManager(KEY_STORE_SERVER_ALIAS, KEY_STORE_CLIENT_ALIAS)}, new TrustManager[]{DUMMY_TRUST_MANAGER}, null);
+            sslContext.init(new KeyManager[]{new SSLKeyManager(KEY_STORE_SERVER_ALIAS)}, new TrustManager[]{DUMMY_TRUST_MANAGER}, null);
             return sslContext;
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize the SSLContext", e);
@@ -167,18 +174,18 @@ public class SSLFactory {
 
     final class SSLKeyManager
             extends X509ExtendedKeyManager {
+        
+        private final Logger logger = LoggerFactory.getLogger(SSLKeyManager.class);
 
         private final String serverAlias;
-        private final String clientAlias;
 
-        public SSLKeyManager(String serverAlias, String clientAlias) {
+        public SSLKeyManager(String serverAlias) {
             this.serverAlias = serverAlias;
-            this.clientAlias = clientAlias;
         }
 
         @Override
-        public String chooseEngineClientAlias(String[] strings, Principal[] prncpls, SSLEngine ssle) {
-            return clientAlias;
+        public String chooseEngineClientAlias(String[] keyType, Principal[] prncpls, SSLEngine ssle) {
+            return chooseClientAlias(keyType, prncpls, null);
         }
 
         @Override
@@ -188,7 +195,49 @@ public class SSLFactory {
 
         @Override
         public String chooseClientAlias(final String[] keyType, final Principal[] issuers, final Socket socket) {
-            return clientAlias;
+            try {
+                if (issuers != null) {
+                    logger.debug("Searching compatible SSL certificates for issuers {}", Arrays.toString(issuers));
+
+                    Enumeration<String> aliases = keystore.aliases();
+                    while (aliases.hasMoreElements()) {
+                        String alias = aliases.nextElement();
+
+                        try {
+                            Key privateKey = keystore.getKey(alias, KEY_STORE_PASSWORD.toCharArray());
+
+                            if (privateKey == null) {
+                                continue;
+                            }
+
+                            X509Certificate cert = (X509Certificate) keystore.getCertificate(alias);
+
+                            if (isSSLClientCertificate(cert)) {
+                                logger.debug("SSL certificate found: {}", cert.getSubjectX500Principal().getName());
+                                Principal certIssuer = cert.getIssuerX500Principal();
+                                for (Principal caIssuer : issuers) {
+                                    if (certIssuer.equals(caIssuer)) {
+                                        logger.debug("Compatible SSL certificate found: {}", cert.getSubjectX500Principal().getName());
+                                        return alias;
+                                    }
+                                }
+                            }
+                        } catch (Exception ex) {
+                            logger.warn("Error filtering certificates", ex);
+                        }
+                    }
+                    logger.error("No suitable client certificate found");
+                } else {
+                    logger.error("Unsuported");
+                }
+                return null;
+            } catch (Exception ex) {
+                throw new UnsupportedOperationException("Error choosing client alias", ex);
+            }
+        }
+
+        private boolean isSSLClientCertificate(X509Certificate cert) {
+            return true;
         }
 
         @Override
@@ -223,7 +272,7 @@ public class SSLFactory {
         @Override
         public String[] getClientAliases(String keyType, Principal[] issuers) {
             return new String[]{
-                clientAlias
+                chooseClientAlias(new String[]{keyType}, issuers, null)
             };
         }
 
