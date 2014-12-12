@@ -3,7 +3,6 @@ package org.mockserver.socket;
 import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import javax.net.ssl.*;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -12,6 +11,9 @@ import java.io.FileOutputStream;
 import java.net.Socket;
 import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
+import java.security.Principal;
+import java.security.PrivateKey;
+import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 
 /**
@@ -19,7 +21,8 @@ import java.security.cert.X509Certificate;
  */
 public class SSLFactory {
 
-    public static final String KEY_STORE_CERT_ALIAS = "certAlias";
+    public static final String KEY_STORE_SERVER_ALIAS = "serverAlias";
+    public static final String KEY_STORE_CLIENT_ALIAS = "clientAlias";
     public static final String KEY_STORE_CA_ALIAS = "caAlias";
     public static final String KEY_STORE_PASSWORD = "changeit";
     public static final String KEY_STORE_FILENAME = "keystore.jks";
@@ -54,13 +57,10 @@ public class SSLFactory {
 
     public SSLContext sslContext() {
         try {
-            // key manager
-            KeyManagerFactory keyManagerFactory = getKeyManagerFactoryInstance(KeyManagerFactory.getDefaultAlgorithm());
-            keyManagerFactory.init(buildKeyStore(), KEY_STORE_PASSWORD.toCharArray());
-
+            buildKeyStore();
             // ssl context
             SSLContext sslContext = getSSLContextInstance("TLS");
-            sslContext.init(keyManagerFactory.getKeyManagers(), new TrustManager[]{DUMMY_TRUST_MANAGER}, null);
+            sslContext.init(new KeyManager[]{new SSLKeyManager(KEY_STORE_SERVER_ALIAS, KEY_STORE_CLIENT_ALIAS)}, new TrustManager[]{DUMMY_TRUST_MANAGER}, null);
             return sslContext;
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize the SSLContext", e);
@@ -104,7 +104,7 @@ public class SSLFactory {
     private void dynamicallyCreateKeyStore() {
         try {
             keystore = new KeyStoreFactory().generateCertificate(
-                    KEY_STORE_CERT_ALIAS,
+                    KEY_STORE_SERVER_ALIAS,
                     KEY_STORE_CA_ALIAS,
                     KEY_STORE_PASSWORD.toCharArray(),
                     "localhost", null, null
@@ -164,4 +164,81 @@ public class SSLFactory {
         engine.setUseClientMode(false);
         return engine;
     }
+
+    final class SSLKeyManager
+            extends X509ExtendedKeyManager {
+
+        private final String serverAlias;
+        private final String clientAlias;
+
+        public SSLKeyManager(String serverAlias, String clientAlias) {
+            this.serverAlias = serverAlias;
+            this.clientAlias = clientAlias;
+        }
+
+        @Override
+        public String chooseEngineClientAlias(String[] strings, Principal[] prncpls, SSLEngine ssle) {
+            return clientAlias;
+        }
+
+        @Override
+        public String chooseEngineServerAlias(String string, Principal[] prncpls, SSLEngine ssle) {
+            return serverAlias;
+        }
+
+        @Override
+        public String chooseClientAlias(final String[] keyType, final Principal[] issuers, final Socket socket) {
+            return clientAlias;
+        }
+
+        @Override
+        public X509Certificate[] getCertificateChain(String alias) {
+            try {
+                Certificate[] certs = keystore.getCertificateChain(alias);
+                if (certs == null) {
+                    return null;
+                }
+                X509Certificate[] x509Certs = new X509Certificate[certs.length];
+                for (int i = 0; i < certs.length; i++) {
+                    x509Certs[i] = (X509Certificate) certs[i];
+                }
+                logger.trace("{} certificates found for alias {}", x509Certs.length, alias);
+                return x509Certs;
+            } catch (Exception ex) {
+                throw new UnsupportedOperationException("Error getting certificate chain", ex);
+            }
+        }
+
+        @Override
+        public PrivateKey getPrivateKey(String alias) {
+            try {
+                PrivateKey privKey = (PrivateKey) keystore.getKey(alias, KEY_STORE_PASSWORD.toCharArray());
+                logger.trace("Private key ({}) -> {}", alias, privKey);
+                return privKey;
+            } catch (Exception ex) {
+                throw new UnsupportedOperationException("Error getting private key", ex);
+            }
+        }
+
+        @Override
+        public String[] getClientAliases(String keyType, Principal[] issuers) {
+            return new String[]{
+                clientAlias
+            };
+        }
+
+        @Override
+        public String[] getServerAliases(String keyType, Principal[] issuers) {
+            return new String[]{
+                serverAlias
+            };
+        }
+
+        @Override
+        public String chooseServerAlias(String keyType, Principal[] issuers, Socket socket) {
+            return serverAlias;
+        }
+
+    }
+
 }
